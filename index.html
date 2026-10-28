@@ -101,10 +101,11 @@ footer{padding:10px 16px 18px;text-align:center;color:var(--dim);font-size:12px}
    Game   : {id, nom, mode:'standard'|'sommeNulle', gagne:'haut'|'bas',
              joueurs:[{id,nom,emoji}], tours:[[number|null,...]], maj:number}
    ========================================================================== */
-const K='scorepad.v1', KT='scorepad.theme', KB='scorepad.v1.bak';
+const K='scorepad.v1', KT='scorepad.theme', KB='scorepad.v1.bak', KBS='scorepad.v1.bak.ts';
 const ID_RE=/^[a-z0-9]{1,16}$/;
 const EMOJIS=['🙂','😀','🦊','🐻','🐼','🦁','🐸','🐵','🐧','🦄','🚀','⭐','🎲','🃏','🏆','🍀'];
-const MONTANT_MAX=999999.999;
+const MONTANT_MAX=999999.99;
+const MONT_RE=/^-?\d{0,6}(\.\d{0,2})?$/;
 
 let data={version:1, games:[]};
 let vue={ecran:'liste', id:'', saisie:null, form:null, focus:null, alerte:''};
@@ -119,11 +120,13 @@ function bandeau(msg){ const b=document.getElementById('banner'); b.textContent=
 
 /* ------------------------------ persistance ------------------------------- */
 function normaliser(brut){
-  const out={version:1, games:[]}; let modifie=false;
+  const out={version:1, games:[]}; let modifie=false; const vus=new Set();
   if(!brut || typeof brut!=='object' || !Array.isArray(brut.games)){ return {out, modifie:true}; }
   for(const g of brut.games){
     if(!g||typeof g!=='object'){ modifie=true; continue; }
-    const id=(typeof g.id==='string'&&ID_RE.test(g.id))?g.id:uid();
+    let id=(typeof g.id==='string'&&ID_RE.test(g.id))?g.id:uid();
+    if(vus.has(id)){ id=uid(); modifie=true; }
+    vus.add(id);
     if(id!==g.id) modifie=true;
     const nom=(typeof g.nom==='string'&&g.nom.trim())?g.nom.slice(0,60):'Partie sans nom';
     if(nom!==g.nom) modifie=true;
@@ -142,21 +145,29 @@ function normaliser(brut){
       const ligne=Array.isArray(t)?t:[];
       const recalee=joueurs.map((_,j)=>{ const v=ligne[j];
         const n=Number(v);
-        return (v===null||v===undefined||v===''||!Number.isFinite(n))?null:Math.max(-MONTANT_MAX,Math.min(MONTANT_MAX,n)); });
+        return (v===null||v===undefined||v===''||!Number.isFinite(n))
+          ? null
+          : Math.round(Math.max(-MONTANT_MAX,Math.min(MONTANT_MAX,n))*100)/100 || 0; });
       if(!Array.isArray(t)||recalee.some((v,i)=>v!==t[i])) modifie=true;
       return recalee;
     });
     out.games.push({id, nom, mode, gagne, joueurs, tours, maj:Number.isFinite(Number(g.maj))?Number(g.maj):Date.now()});
   }
-  if(!out.games.length) modifie=true;
   return {out, modifie};
 }
+function sauvegarderOriginal(texte){
+  try{
+    if(localStorage.getItem(KBS)) return;            // on n'écrase pas une sauvegarde existante
+    localStorage.setItem(KB, texte);
+    localStorage.setItem(KBS, String(Date.now()));
+  }catch(e){}
+}
 function load(){
-  let brut=null;
-  try{ const s=localStorage.getItem(K); brut=s?JSON.parse(s):null; }
+  let brut=null, texte=null;
+  try{ texte=localStorage.getItem(K); brut=texte?JSON.parse(texte):null; }
   catch(e){ bandeau('Données illisibles : une sauvegarde a été conservée, la session repart à vide.'); }
   const {out, modifie}=normaliser(brut);
-  if(modifie && brut){ try{ localStorage.setItem(KB, JSON.stringify(brut)); }catch(e){} }
+  if(texte && (modifie || brut===null)) sauvegarderOriginal(texte);
   data=out;
   let theme='sombre';
   try{ theme=localStorage.getItem(KT)==='clair'?'clair':'sombre'; }catch(e){}
@@ -172,14 +183,18 @@ function save(){
 
 /* -------------------------------- requêtes -------------------------------- */
 function jeu(){ return data.games.find(g=>g.id===vue.id); }
-function total(g,j){ return g.tours.reduce((s,t)=>s+(Number(t[j])||0),0); }
+function total(g,j){ return Math.round(g.tours.reduce((s,t)=>s+(Number(t[j])||0),0)*100)/100; }
 function totaux(g){ return g.joueurs.map((_,j)=>total(g,j)); }
 function aDesScores(g){ return g.tours.some(t=>t.some(v=>v!==null&&v!==undefined)); }
+function aMarque(g,j){ return g.tours.some(t=>t[j]!==null&&t[j]!==undefined); }
 function gagnant(g){
   if(!g.joueurs.length||!aDesScores(g)) return {index:-1, egalite:false, aucun:true, indices:[]};
   const t=totaux(g), max=g.gagne!=='bas';
-  let best=max?Math.max(...t):Math.min(...t);
-  const indices=t.map((v,i)=>v===best?i:-1).filter(i=>i>=0);
+  const candidats=t.map((v,i)=>aMarque(g,i)?i:-1).filter(i=>i>=0);   // un joueur sans score ne gagne pas
+  if(!candidats.length) return {index:-1, egalite:false, aucun:true, indices:[]};
+  const vals=candidats.map(i=>t[i]);
+  const best=max?Math.max(...vals):Math.min(...vals);
+  const indices=candidats.filter(i=>t[i]===best);
   return {index:indices[0], egalite:indices.length>1, aucun:false, indices};
 }
 
@@ -191,6 +206,7 @@ function render(){
   const scroll=app.querySelector('.gridwrap');
   const sc=scroll?{l:scroll.scrollLeft,t:scroll.scrollTop}:null;
   app.innerHTML = vue.ecran==='liste'? vueListe() : vue.ecran==='nouvelle'? vueNouvelle() : vueJeu();
+  if(vue.saisie){ const g2=jeu(); if(!g2||!ligneValide(g2,vue.saisie.t)||!g2.joueurs[vue.saisie.j]) fermerFeuille(false); }
   brancher();
   const apres=app.querySelector('.gridwrap');
   if(sc&&apres){ apres.scrollLeft=sc.l; apres.scrollTop=sc.t; }
@@ -276,43 +292,143 @@ function vueJeu(){
   </div>
   <div class="muted">Appuyez sur une case pour saisir ou corriger un score. Victoire au score le ${g.gagne==='bas'?'plus bas':'plus haut'} · mode ${g.mode==='sommeNulle'?'somme nulle':'standard'}.${w.egalite?' <strong>Égalité : '+w.indices.map(i=>esc(g.joueurs[i].nom)).join(', ')+'.</strong>':''}</div>`;
 }
+function ligneValide(g,t){ return !!(g && Array.isArray(g.tours) && g.tours[t]); }
 function feuilleSaisie(){
   const s=vue.saisie; if(!s) return '';
-  const g=jeu(), j=g.joueurs[s.j];
-  const reste=(()=>{ const ligne=g.tours[s.t]||[]; const somme=ligne.reduce((a,x)=>a+(Number(x)||0),0);
-    return somme; })();
+  const g=jeu();
+  if(!g || !ligneValide(g,s.t) || !g.joueurs[s.j]){ return ''; }
+  const j=g.joueurs[s.j];
   const alerte=(g.mode==='sommeNulle'&&s.etape===1);
   return `<div class="sheet" data-sheet="1"><div class="inner" role="dialog" aria-modal="true" aria-label="Saisie du score" tabindex="-1">
     <div class="who"><span class="name">${esc(j.emoji)} ${esc(j.nom)}</span><span class="muted">Tour ${s.t+1}</span></div>
-    <div class="disp" role="status" aria-live="polite" aria-label="Valeur saisie">${esc(s.val===''?'0':s.val)}</div>
+    <div class="disp" id="sDisp" role="status" aria-live="polite" aria-label="Valeur saisie">${esc(s.val===''||s.val==='-'?'—':s.val)}</div>
     <div class="keys">
       ${[1,2,3,4,5,6,7,8,9].map(n=>`<button data-key="${n}">${n}</button>`).join('')}
       <button data-key="±" aria-label="Changer le signe">±</button><button data-key="0">0</button>
       <button data-key="←" aria-label="Effacer le dernier chiffre">←</button>
       <button class="soft" data-key="vide">Effacer</button>
       <button data-key=".">.</button>
-      <button class="wide ${alerte?'warn':''}" data-key="ok">${alerte?'Total ≠ 0 — valider quand même':'Valider'}</button>
+      <button class="wide ${alerte?'warn':''}" id="sOk" data-key="ok">${alerte?'Total ≠ 0 — valider quand même':'Valider'}</button>
     </div>
-    <div class="hint ${s.msg?'alerte':''}">${esc(s.msg || (g.mode==='sommeNulle'
-        ? 'Somme nulle · total du tour actuel : '+fmt(reste-(Number(g.tours[s.t][s.j])||0)+(Number(s.val)||0))
-        : 'Montant négatif autorisé avec ±'))}</div>
+    <div class="hint ${alerte?'alerte':''}" id="sHint">${esc(texteIndice(g,s))}</div>
   </div></div>`;
 }
+function texteIndice(g,s){
+  if(s.msg) return s.msg;
+  if(g.mode==='sommeNulle'){
+    const ligne=g.tours[s.t]||[];
+    const somme=ligne.reduce((a,x)=>a+(Number(x)||0),0)
+      - (Number(ligne[s.j])||0) + (Number(s.val)||0);
+    const reste=Math.round((-somme)*100)/100;
+    return 'Somme nulle · reste à répartir : '+fmt(reste)
+      +(reste===0?' (tour équilibré)':'');
+  }
+  return 'Case vide puis Valider : le score est effacé. Montant négatif avec ±';
+}
+/* ---- la feuille est mise à jour SUR PLACE : le focus et les annonces restent stables ---- */
+function majFeuille(){
+  const s=vue.saisie; if(!s) return;
+  const g=jeu(); if(!g) return;
+  const d=document.getElementById('sDisp'), h=document.getElementById('sHint'), ok=document.getElementById('sOk');
+  if(d) d.textContent = (s.val===''||s.val==='-'?'—':s.val);
+  if(h){ h.textContent=texteIndice(g,s); h.className='hint '+(s.etape===1?'alerte':''); }
+  if(ok){ const al=(g.mode==='sommeNulle'&&s.etape===1);
+    ok.textContent = al?'Total ≠ 0 — valider quand même':'Valider';
+    ok.className = 'wide '+(al?'warn':''); }
+}
+function ouvrirFeuille(){
+  const host=document.getElementById('sheetHost');
+  host.innerHTML=feuilleSaisie();
+  document.getElementById('app').inert=true;
+  host.querySelector('.inner')?.focus({preventScroll:true});
+  host.onclick=(e)=>{
+    if(e.target.dataset.sheet){ fermerFeuille(); return; }
+    const b=e.target.closest('[data-key]'); if(b) touche(b.dataset.key);
+  };
+  document.removeEventListener('keydown', touchesClavier);
+  document.addEventListener('keydown', touchesClavier);
+}
+function touchesClavier(e){
+  if(!vue.saisie) return;
+  if(e.key==='Escape'){ e.preventDefault(); fermerFeuille(); return; }
+  if(e.key==='Entrée'||e.key==='Enter'){ e.preventDefault(); touche('ok'); return; }
+  if(e.key==='Retour arrière'||e.key==='Backspace'){ e.preventDefault(); touche('←'); return; }
+  if(e.key===','||e.key==='.'){ e.preventDefault(); touche('.'); return; }
+  if(e.key==='-'){ e.preventDefault(); touche('±'); return; }
+  if(/^[0-9]$/.test(e.key)){ e.preventDefault(); touche(e.key); }
+}
+function fermerFeuille(rendreFocus=true){
+  document.getElementById('sheetHost').innerHTML='';
+  document.getElementById('app').inert=false;
+  document.removeEventListener('keydown', touchesClavier);
+  const s=vue.saisie; vue.saisie=null;
+  document.getElementById('sheetHost').onclick=null;
+  if(rendreFocus && s){ vue.focus='[data-cell="'+s.t+':'+s.j+'"]'; render(); }
+}
+/* ---- frappe : limites sans perte de signe, deux décimales au plus ---- */
+function chiffresSaisis(val){ return (val||'').replace('-','').replace('.','').length; }
+function decimalesSaisies(val){ const i=(val||'').indexOf('.'); return i<0?0:(val.length-i-1); }
+function touche(k){
+  const s=vue.saisie; if(!s) return;
+  if(k==='ok'){ validerSaisie(); return; }
+  // toute autre touche annule l'étape « valider quand même » : le contrôle doit se refaire
+  s.etape=0; s.msg='';
+  if(k==='vide'){ s.val=''; s.frais=false; }
+  else if(k==='←'){ s.val=s.val.slice(0,-1); s.frais=false; }
+  else if(k==='±'){ s.val=s.val.startsWith('-')? s.val.slice(1) : '-'+(s.val||'0'); s.frais=false; }
+  else if(k==='.'){ if(decimalesSaisies(s.val)===0 && !s.val.includes('.')){ s.val=(s.val||'0')+'.'; s.frais=false; } }
+  else {
+    if(s.frais){ s.val=''; s.frais=false; }
+    if(decimalesSaisies(s.val)>=2 || chiffresSaisis(s.val)>=6){ majFeuille(); return; }  // on refuse la touche, on ne tronque pas
+    s.val=(s.val==='0'?'':s.val)+k;
+  }
+  majFeuille();
+}
+function validerSaisie(){
+  const s=vue.saisie, g=jeu(); if(!s||!g) return;
+  if(!ligneValide(g,s.t) || !g.joueurs[s.j]){ fermerFeuille(false); return; }   // tour supprimé entre-temps
+  const brut=(s.val||'').trim();
+  const ancien=g.tours[s.t][s.j];
+  if(brut===''||brut==='-'){                    // case vidée volontairement
+    g.tours[s.t][s.j]=null; g.maj=Date.now(); save(); fermerFeuille(); return;
+  }
+  if(!MONT_RE.test(brut)){
+    s.msg='Montant invalide : six chiffres au plus, un point et deux décimales.'; majFeuille(); return;
+  }
+  let v=Number(brut);
+  if(!Number.isFinite(v)){ s.msg='Montant invalide.'; majFeuille(); return; }
+  v=Math.round(Math.max(-MONTANT_MAX, Math.min(MONTANT_MAX, v))*100)/100;
+  if(Object.is(v,-0)) v=0;
+  g.tours[s.t][s.j]=v;
+  if(g.mode==='sommeNulle'){
+    const somme=Math.round(g.tours[s.t].reduce((a,x)=>a+(Number(x)||0),0)*100)/100;
+    const complet=g.tours[s.t].every(x=>x!==null);
+    if(complet && Math.abs(somme)>0.001 && s.etape<1){
+      g.tours[s.t][s.j]=ancien;               // rien n'est écrit tant que ce n'est pas confirmé
+      s.etape=1; s.msg='Ce tour totalise '+fmt(somme)+' au lieu de 0. Appuyez de nouveau sur Valider pour confirmer.';
+      majFeuille(); return;
+    }
+  }
+  g.maj=Date.now(); save(); fermerFeuille();
+}
 
-/* -------------------------------- liaisons -------------------------------- */
 function brancher(){
-  const app=document.getElementById('app'), q=s=>app.querySelector(s);
+  const app=document.getElementById('app'), q=x=>app.querySelector(x);
   q('[data-act="nouvelle"]')?.addEventListener('click',()=>{
-    vue={ecran:'nouvelle', id:'', saisie:null, alerte:'', focus:'#fNom',
-         form:{nom:'', joueur:'', mode:'standard', gagne:'haut', joueurs:[]}}; render();});
+    vue={ecran:'nouvelle', id:'', saisie:null, form:{nom:'', joueur:'', mode:'standard', gagne:'haut', joueurs:[]},
+         focus:'#fNom', alerte:''};
+    render();});
   app.querySelectorAll('[data-open]').forEach(b=>b.addEventListener('click',()=>{
-    vue={ecran:'jeu', id:b.dataset.open, saisie:null, form:null, alerte:'', focus:'[data-act="addtour"]'}; render();}));
+    vue={ecran:'jeu', id:b.dataset.open, saisie:null, form:null, focus:'[data-act="addtour"]', alerte:''};
+    render();}));
   app.querySelectorAll('[data-del]').forEach(b=>b.addEventListener('click',()=>{
     const g=data.games.find(x=>x.id===b.dataset.del);
     if(g&&confirm('Supprimer définitivement la partie « '+g.nom+' » ?')){
-      data.games=data.games.filter(x=>x.id!==g.id); save(); vue.focus='[data-act="nouvelle"]'; render();}}));
+      data.games=data.games.filter(x=>x.id!==g.id); save();
+      vue={ecran:'liste', id:'', saisie:null, form:null, focus:'[data-act="nouvelle"]', alerte:''}; render();}}));
   q('[data-act="retour"]')?.addEventListener('click',()=>{
-    vue={ecran:'liste', id:'', saisie:null, form:null, alerte:'', focus:'[data-act="nouvelle"]'}; render();});
+    if(vue.saisie) fermerFeuille(false);
+    vue={ecran:'liste', id:'', saisie:null, form:null, focus:'[data-act="nouvelle"]', alerte:''}; render();});
   q('#fNom')?.addEventListener('input',e=>{ vue.form.nom=e.target.value; });
   q('#fJoueur')?.addEventListener('input',e=>{ vue.form.joueur=e.target.value; });
   q('[data-act="addj"]')?.addEventListener('click',()=>{
@@ -334,80 +450,24 @@ function brancher(){
     const g={id:uid(), nom, mode:vue.form.mode, gagne:vue.form.gagne,
              joueurs:vue.form.joueurs.slice(), tours:[vue.form.joueurs.map(()=>null)], maj:Date.now()};
     data.games.push(g); save();
-    vue={ecran:'jeu', id:g.id, saisie:null, form:null, alerte:'', focus:'[data-act="addtour"]'}; render();});
+    vue={ecran:'jeu', id:g.id, saisie:null, form:null, alerte:'', focus:'[data-cell="0:0"]'}; render();});
   q('[data-act="addtour"]')?.addEventListener('click',()=>{
-    const g=jeu(); g.tours.push(g.joueurs.map(()=>null)); g.maj=Date.now(); save(); render();});
+    const g=jeu(); if(!g) return;
+    g.tours.push(g.joueurs.map(()=>null)); g.maj=Date.now(); save();
+    vue.focus='[data-cell="'+(g.tours.length-1)+':0"]'; render();});
   q('[data-act="delder"]')?.addEventListener('click',()=>{
-    const g=jeu(); if(!g.tours.length) return;
-    if(confirm('Supprimer le dernier tour et ses scores ?')){ g.tours.pop(); g.maj=Date.now(); save(); render(); }});
+    const g=jeu(); if(!g||!g.tours.length) return;
+    if(confirm('Supprimer le dernier tour et ses scores ?')){
+      g.tours.pop(); g.maj=Date.now(); save(); vue.focus='[data-act="addtour"]'; render(); }});
   q('[data-act="export"]')?.addEventListener('click',()=>exporter(jeu()));
   app.querySelectorAll('[data-cell]').forEach(b=>b.addEventListener('click',()=>{
-    const [t,j]=b.dataset.cell.split(':').map(Number), v=jeu().tours[t][j];
-    const plein=(v!==null&&v!==undefined);
+    const g=jeu(); if(!g) return;
+    const [t,j]=b.dataset.cell.split(':').map(Number);
+    if(!ligneValide(g,t)||!g.joueurs[j]) return;
+    const v=g.tours[t][j], plein=(v!==null&&v!==undefined);
     vue.saisie={t, j, val:plein?String(v):'', frais:plein, etape:0, msg:''};
     ouvrirFeuille();}));
 }
-function ouvrirFeuille(){
-  const host=document.getElementById('sheetHost');
-  host.innerHTML=feuilleSaisie();
-  const inner=host.querySelector('.inner'); inner?.focus({preventScroll:true});
-  host.querySelector('[data-sheet]')?.addEventListener('click',e=>{
-    if(e.target.dataset.sheet) fermerFeuille();});
-  host.querySelectorAll('[data-key]').forEach(b=>b.addEventListener('click',()=>touche(b.dataset.key)));
-  document.addEventListener('keydown', echap);
-}
-function echap(e){ if(e.key==='Escape'){ fermerFeuille(); } }
-function fermerFeuille(){
-  document.getElementById('sheetHost').innerHTML='';
-  document.removeEventListener('keydown', echap);
-  const s=vue.saisie; vue.saisie=null;
-  vue.focus=s?`[data-cell="${s.t}:${s.j}"]`:null;
-  if(vue.focus) render();
-}
-function touche(k){
-  const s=vue.saisie; if(!s) return;
-  s.msg='';
-  if(k==='ok'){ validerSaisie(); return; }
-  if(k==='vide'){ s.val=''; s.frais=false; }
-  else if(k==='←'){ s.val=s.val.slice(0,-1); s.frais=false; }
-  else if(k==='±'){ s.val=s.val.startsWith('-')? s.val.slice(1) : '-'+(s.val||'0'); s.frais=false; }
-  else if(k==='.'){ if(!s.val.includes('.')){ s.val=(s.val||'0')+'.'; s.frais=false; } }
-  else { if(s.frais){ s.val=''; s.frais=false; } s.val=(s.val==='0'?'':s.val)+k; if(s.val.replace('-','').length>9) s.val=s.val.slice(1); }
-  document.getElementById('sheetHost').innerHTML=feuilleSaisie();
-  document.querySelector('#sheetHost .inner')?.focus({preventScroll:true});
-  document.querySelectorAll('#sheetHost [data-key]').forEach(b=>b.addEventListener('click',()=>touche(b.dataset.key)));
-}
-function validerSaisie(){
-  const s=vue.saisie, g=jeu(); if(!s||!g) return;
-  const brut=(s.val||'').trim();
-  const ancien=g.tours[s.t][s.j];
-  if(brut===''||brut==='-'){                 // case vidée volontairement
-    g.tours[s.t][s.j]=null; g.maj=Date.now(); save(); fermerFeuille(); return;
-  }
-  if(!/^-?\d{0,9}(\.\d{0,2})?$/.test(brut)){
-    s.msg='Montant invalide : chiffres, un point et deux décimales au plus.'; rafraichirFeuille(); return;
-  }
-  const v=Number(brut);
-  if(!Number.isFinite(v)){ s.msg='Montant invalide.'; rafraichirFeuille(); return; }
-  const borne=Math.max(-MONTANT_MAX, Math.min(MONTANT_MAX, v));
-  g.tours[s.t][s.j]=borne;
-  if(g.mode==='sommeNulle'){
-    const somme=g.tours[s.t].reduce((a,x)=>a+(Number(x)||0),0);
-    const complet=g.tours[s.t].every(x=>x!==null);
-    if(complet && Math.abs(somme)>0.001 && s.etape<1){
-      g.tours[s.t][s.j]=ancien;               // on n'écrit pas tant que ce n'est pas confirmé
-      s.etape=1; s.msg='Ce tour totalise '+fmt(somme)+' au lieu de 0. Appuyez de nouveau pour valider quand même.';
-      rafraichirFeuille(); return;
-    }
-  }
-  g.maj=Date.now(); save(); fermerFeuille();
-}
-function rafraichirFeuille(){
-  document.getElementById('sheetHost').innerHTML=feuilleSaisie();
-  document.querySelector('#sheetHost .inner')?.focus({preventScroll:true});
-  document.querySelectorAll('#sheetHost [data-key]').forEach(b=>b.addEventListener('click',()=>touche(b.dataset.key)));
-}
-
 /* --------------------------------- export -------------------------------- */
 async function exporter(g){
   if(!g) return;
@@ -422,12 +482,18 @@ async function exporter(g){
     try{ await navigator.share({title:g.nom, text:txt}); return; }
     catch(e){ if(e && e.name==='AbortError') return; }
   }
-  try{ await navigator.clipboard.writeText(txt); bandeau('Résumé copié dans le presse-papiers.'); }
-  catch(e){
-    const a=document.createElement('textarea'); a.value=txt; document.body.appendChild(a); a.select();
-    try{ document.execCommand('copy'); bandeau('Résumé copié dans le presse-papiers.'); }
-    catch(_){ bandeau('Copie impossible : sélectionnez le texte dans la zone affichée.'); }
-    a.remove();
+  try{
+    await navigator.clipboard.writeText(txt);
+    bandeau('Résumé copié dans le presse-papiers.');
+  }catch(e){
+    const a=document.createElement('textarea');
+    a.value=txt; a.setAttribute('aria-label','Résumé de la partie à copier');
+    document.body.appendChild(a); a.select();
+    let ok=false;
+    try{ ok=document.execCommand('copy'); }catch(_){ ok=false; }
+    if(ok){ a.remove(); bandeau('Résumé copié dans le presse-papiers.'); }
+    else { a.style.cssText='position:fixed;inset:8% 8% auto;height:40vh;z-index:99';
+           bandeau('Copie automatique impossible : le résumé reste affiché, sélectionnez-le et copiez-le.'); }
   }
 }
 
