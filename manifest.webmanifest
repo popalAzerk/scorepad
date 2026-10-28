@@ -1,0 +1,10 @@
+{
+  "name": "Score Pad",
+  "short_name": "Score Pad",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#12141c",
+  "theme_color": "#12141c",
+  "lang": "fr",
+  "description": "Compteur de points pour jeux de société et de cartes : tours, totaux automatiques, historique."
+}
